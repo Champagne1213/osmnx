@@ -16,6 +16,7 @@ import networkx as nx
 from shapely.geometry import Point
 from shapely.geometry import LineString
 from shapely import wkt
+from xml.etree import ElementTree as etree
 
 from . import settings
 from .utils import log
@@ -24,7 +25,7 @@ from .utils import make_str
 
 def save_gdf_shapefile(gdf, filename=None, folder=None):
     """
-    Save a GeoDataFrame of place shapes or building footprints as an ESRI
+    Save a GeoDataFrame of place shapes or footprints as an ESRI
     shapefile.
 
     Parameters
@@ -93,8 +94,8 @@ def save_graph_shapefile(G, filename='graph', folder=None, encoding='utf-8'):
     G_save = get_undirected(G.copy())
 
     # create a GeoDataFrame of the nodes and set CRS
-    nodes = {node:data for node, data in G_save.nodes(data=True)}
-    gdf_nodes = gpd.GeoDataFrame(nodes).T
+    nodes, data = zip(*G_save.nodes(data=True))
+    gdf_nodes = gpd.GeoDataFrame(list(data), index=nodes)
     gdf_nodes.crs = G_save.graph['crs']
 
     # create a geometry column then drop the x and y columns
@@ -102,7 +103,6 @@ def save_graph_shapefile(G, filename='graph', folder=None, encoding='utf-8'):
     gdf_nodes = gdf_nodes.drop(['x', 'y'], axis=1)
 
     # make everything but geometry column a string
-    gdf_nodes['osmid'] = gdf_nodes['osmid'].astype(np.int64)
     for col in [c for c in gdf_nodes.columns if not c == 'geometry']:
         gdf_nodes[col] = gdf_nodes[col].fillna('').map(make_str)
 
@@ -144,7 +144,98 @@ def save_graph_shapefile(G, filename='graph', folder=None, encoding='utf-8'):
     log('Saved graph "{}" to disk as shapefiles at "{}" in {:,.2f} seconds'.format(G_save.name, folder, time.time()-start_time))
 
 
-def save_graphml(G, filename='graph.graphml', folder=None):
+def save_graph_osm(G, node_tags=settings.osm_xml_node_tags,
+                   node_attrs=settings.osm_xml_node_attrs,
+                   edge_tags=settings.osm_xml_way_tags,
+                   edge_attrs=settings.osm_xml_way_attrs,
+                   oneway=True, filename='graph.osm',
+                   folder=None):
+    """
+    Save a graph as an OSM XML formatted file. NOTE: for very large
+    networks this method can take upwards of 30+ minutes to finish.
+
+    Parameters
+    __________
+    G : networkx multidigraph or multigraph
+    filename : string
+        the name of the osm file (including file extension)
+    folder : string
+        the folder to contain the file, if None, use default data folder
+
+    Returns
+    -------
+    None
+    """
+    start_time = time.time()
+    if folder is None:
+        folder = settings.data_folder
+
+    # create a copy to convert all the node/edge attribute values to string
+    G_save = G.copy()
+
+    gdf_nodes, gdf_edges = graph_to_gdfs(
+        G_save, node_geometry=False, fill_edge_geometry=False)
+
+    # rename columns per osm specification
+    gdf_nodes.rename(
+        columns={'osmid': 'id', 'x': 'lon', 'y': 'lat'}, inplace=True)
+    if 'uniqueid' in gdf_edges.columns:
+        gdf_edges = gdf_edges.rename(columns={'uniqueid': 'id'})
+    else:
+        gdf_edges = gdf_edges.reset_index().rename(columns={'index': 'id'})
+
+    # add default values for required attributes
+    for table in [gdf_nodes, gdf_edges]:
+        table['uid'] = '1'
+        table['user'] = 'osmnx'
+        table['version'] = '1'
+        table['changeset'] = '1'
+        table['timestamp'] = '2017-01-01T00:00:00Z'
+
+    # convert all datatypes to str
+    nodes = gdf_nodes.applymap(str)
+    edges = gdf_edges.applymap(str)
+
+    # misc. string replacements to meet OSM XML spec
+    if 'oneway' in edges.columns:
+        edges.loc[:, 'oneway'] = oneway
+        edges.loc[:, 'oneway'] = edges['oneway'].astype(str)
+        edges.loc[:, 'oneway'] = edges['oneway'].str.replace(
+            'False', 'no').replace('True', 'yes')
+
+    # initialize XML tree with an OSM root element
+    root = etree.Element('osm')
+
+    # append nodes to the XML tree
+    for i, row in nodes.iterrows():
+        node = etree.SubElement(
+            root, 'node', attrib=row[node_attrs].dropna().to_dict())
+        for tag in node_tags:
+            etree.SubElement(
+                node, 'tag', attrib={'k': tag, 'v': row[tag]})
+
+    # append edges to the XML tree
+    for i, row in edges.iterrows():
+        edge = etree.SubElement(
+            root, 'way', attrib=row[edge_attrs].dropna().to_dict())
+        etree.SubElement(edge, 'nd', attrib={'ref': row['u']})
+        etree.SubElement(edge, 'nd', attrib={'ref': row['v']})
+        for tag in edge_tags:
+            etree.SubElement(
+                edge, 'tag', attrib={'k': tag, 'v': row[tag]})
+
+    et = etree.ElementTree(root)
+
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+
+    et.write(os.path.join(folder, filename))
+
+    log('Saved graph "{}" to disk as OSM at "{}" in {:,.2f} seconds'.format(
+        G_save.name, os.path.join(folder, filename), time.time() - start_time))
+
+
+def save_graphml(G, filename='graph.graphml', folder=None, gephi=False):
     """
     Save graph as GraphML file to disk.
 
@@ -155,6 +246,9 @@ def save_graphml(G, filename='graph.graphml', folder=None):
         the name of the graphml file (including file extension)
     folder : string
         the folder to contain the file, if None, use default data folder
+    gephi : bool
+        if True, give each edge a unique key to work around Gephi's
+        restrictive interpretation of the GraphML specification
 
     Returns
     -------
@@ -165,16 +259,41 @@ def save_graphml(G, filename='graph.graphml', folder=None):
     if folder is None:
         folder = settings.data_folder
 
-    # create a copy and convert all the node/edge attribute values to string or
-    # it won't save
+    # create a copy to convert all the node/edge attribute values to string
     G_save = G.copy()
-    for dict_key in G_save.graph:
-        # convert all the graph attribute values to strings
-        G_save.graph[dict_key] = make_str(G_save.graph[dict_key])
+
+    if gephi:
+
+        gdf_nodes, gdf_edges = graph_to_gdfs(G_save, nodes=True, edges=True, node_geometry=True,
+                                             fill_edge_geometry=True)
+
+        # turn each edge's key into a unique ID for Gephi compatibility
+        gdf_edges['key'] = range(len(gdf_edges))
+
+        # gephi doesn't handle node attrs named x and y well, so rename
+        gdf_nodes['xcoord'] = gdf_nodes['x']
+        gdf_nodes['ycoord'] = gdf_nodes['y']
+        G_save = gdfs_to_graph(gdf_nodes, gdf_edges)
+
+        # remove graph attributes as Gephi only accepts node and edge attrs
+        G_save.graph = {}
+
+    else:
+        # if not gephi, keep graph attrs and stringify them
+        for dict_key in G_save.graph:
+            # convert all the graph attribute values to strings
+            G_save.graph[dict_key] = make_str(G_save.graph[dict_key])
+
+    # stringify node and edge attributes
     for _, data in G_save.nodes(data=True):
         for dict_key in data:
-            # convert all the node attribute values to strings
-            data[dict_key] = make_str(data[dict_key])
+            if gephi and dict_key in ['xcoord', 'ycoord']:
+                # don't convert x y values to string if saving for gephi
+                continue
+            else:
+                # convert all the node attribute values to strings
+                data[dict_key] = make_str(data[dict_key])
+
     for _, _, data in G_save.edges(keys=False, data=True):
         for dict_key in data:
             # convert all the edge attribute values to strings
@@ -187,7 +306,7 @@ def save_graphml(G, filename='graph.graphml', folder=None):
     log('Saved graph "{}" to disk as GraphML at "{}" in {:,.2f} seconds'.format(G_save.name, os.path.join(folder, filename), time.time()-start_time))
 
 
-def load_graphml(filename, folder=None):
+def load_graphml(filename, folder=None, node_type=int):
     """
     Load a GraphML file from disk and convert the node/edge attributes to
     correct data types.
@@ -198,6 +317,8 @@ def load_graphml(filename, folder=None):
         the name of the graphml file (including file extension)
     folder : string
         the folder containing the file, if None, use default data folder
+    node_type : type
+        (Python type (default: int)) - Convert node ids to this type
 
     Returns
     -------
@@ -209,10 +330,12 @@ def load_graphml(filename, folder=None):
     if folder is None:
         folder = settings.data_folder
     path = os.path.join(folder, filename)
-    G = nx.MultiDiGraph(nx.read_graphml(path, node_type=int))
+    G = nx.MultiDiGraph(nx.read_graphml(path, node_type=node_type))
 
     # convert graph crs attribute from saved string to correct dict data type
-    G.graph['crs'] = ast.literal_eval(G.graph['crs'])
+    # if it is a stringified dict rather than a proj4 string
+    if 'crs' in G.graph and G.graph['crs'].startswith('{') and G.graph['crs'].endswith('}'):
+        G.graph['crs'] = ast.literal_eval(G.graph['crs'])
 
     if 'streets_per_node' in G.graph:
         G.graph['streets_per_node'] = ast.literal_eval(G.graph['streets_per_node'])
@@ -220,7 +343,7 @@ def load_graphml(filename, folder=None):
     # convert numeric node tags from string to numeric data types
     log('Converting node and edge attribute data types')
     for _, data in G.nodes(data=True):
-        data['osmid'] = int(data['osmid'])
+        data['osmid'] = node_type(data['osmid'])
         data['x'] = float(data['x'])
         data['y'] = float(data['y'])
 
@@ -237,18 +360,22 @@ def load_graphml(filename, folder=None):
         for attr in ['highway', 'name', 'bridge', 'tunnel', 'lanes', 'ref', 'maxspeed', 'service', 'access', 'area', 'landuse', 'width', 'est_width']:
             # if this edge has this attribute, and it starts with '[' and ends
             # with ']', then it's a list to be parsed
-            if attr in data and data[attr][0] == '[' and data[attr][-1] == ']':
-                # convert the string list to a list type, else leave as
-                # single-value string
-                data[attr] = ast.literal_eval(data[attr])
+            if attr in data and data[attr].startswith('[') and data[attr].endswith(']'):
+                # try to convert the string list to a list type, else leave as
+                # single-value string (and leave as string if error)
+                try:
+                    data[attr] = ast.literal_eval(data[attr])
+                except:
+                    pass
 
-        # osmid might have a single value or a list, but if single value, then
-        # parse int
+        # osmid might have a single value or a list
         if 'osmid' in data:
             if data['osmid'][0] == '[' and data['osmid'][-1] == ']':
-                data['osmid'] = ast.literal_eval(data['osmid'])
+                # if it's a list, eval the list then convert each element to node_type
+                data['osmid'] = [node_type(i) for i in ast.literal_eval(data['osmid'])]
             else:
-                data['osmid'] = int(data['osmid'])
+                # if it's not a list, convert it to the node_type
+                data['osmid'] = node_type(data['osmid'])
 
         # if geometry attribute exists, load the string as well-known text to
         # shapely LineString
@@ -344,9 +471,9 @@ def update_edge_keys(G):
     """
     Update the keys of edges that share a u, v with another edge but differ in
     geometry. For example, two one-way streets from u to v that bow away from
-    each other as separate streets, rather than opposite direction edges of a 
+    each other as separate streets, rather than opposite direction edges of a
     single street.
-    
+
     Parameters
     ----------
     G : networkx multidigraph
@@ -366,10 +493,10 @@ def update_edge_keys(G):
 
     different_streets = []
     groups = dupes[['geometry', 'uvk', 'u', 'v', 'key', 'dupe']].groupby('uvk')
-    
+
     # for each set of duplicate edges
     for label, group in groups:
-        
+
         # if there are more than 2 edges here, make sure to compare all
         if len(group['geometry']) > 2:
             l = group['geometry'].tolist()
@@ -378,7 +505,7 @@ def update_edge_keys(G):
         # otherwise, just compare the first edge to the second edge
         else:
             geom_pairs = [(group['geometry'].iloc[0], group['geometry'].iloc[1])]
-        
+
         # for each pair of edges to compare
         for geom1, geom2 in geom_pairs:
             # if they don't have the same geometry, flag them as different streets
@@ -389,7 +516,9 @@ def update_edge_keys(G):
 
     # for each unique different street, iterate its key + 1 so it's unique
     for u, v, k in set(different_streets):
-        G.add_edge(u, v, key=k+1, **G[u][v][k])
+        # filter out key if it appears in data dict as we'll pass it explicitly
+        attributes = {k:v for k, v in G[u][v][k].items() if k != 'key'}
+        G.add_edge(u, v, key=k+1, **attributes)
         G.remove_edge(u, v, key=k)
 
     return G
@@ -417,7 +546,7 @@ def get_undirected(G):
     for u, v, k, data in G.edges(keys=True, data=True):
         G.edges[u, v, k]['from'] = u
         G.edges[u, v, k]['to'] = v
-        
+
         # add geometry if it doesn't already exist, to retain parallel
         # edges' distinct geometries
         if 'geometry' not in data:
@@ -498,13 +627,12 @@ def graph_to_gdfs(G, nodes=True, edges=True, node_geometry=True, fill_edge_geome
 
         start_time = time.time()
 
-        nodes = {node:data for node, data in G.nodes(data=True)}
-        gdf_nodes = gpd.GeoDataFrame(nodes).T
+        nodes, data = zip(*G.nodes(data=True))
+        gdf_nodes = gpd.GeoDataFrame(list(data), index=nodes)
         if node_geometry:
             gdf_nodes['geometry'] = gdf_nodes.apply(lambda row: Point(row['x'], row['y']), axis=1)
         gdf_nodes.crs = G.graph['crs']
         gdf_nodes.gdf_name = '{}_nodes'.format(G.graph['name'])
-        gdf_nodes['osmid'] = gdf_nodes['osmid'].astype(np.int64).map(make_str)
 
         to_return.append(gdf_nodes)
         log('Created GeoDataFrame "{}" from graph in {:,.2f} seconds'.format(gdf_nodes.gdf_name, time.time()-start_time))

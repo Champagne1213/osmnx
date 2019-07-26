@@ -5,7 +5,7 @@ from setuptools import setup
 
 # provide a long description using reStructuredText
 long_description = """
-**OSMnx** is a package to easily download, construct, project, visualize, and
+**OSMnx** is a package to easily download, model, project, visualize, and
 analyze complex street networks from OpenStreetMap in Python with NetworkX.
 
 You can get a city's or neighborhood's walking, driving, or biking network with
@@ -40,7 +40,8 @@ classifiers = ['Development Status :: 5 - Production/Stable',
                'Programming Language :: Python :: 3',
                'Programming Language :: Python :: 3.4',
                'Programming Language :: Python :: 3.5',
-               'Programming Language :: Python :: 3.6']
+               'Programming Language :: Python :: 3.6',
+               'Programming Language :: Python :: 3.7']
 
 with open('requirements.txt') as f:
     requirements_lines = f.readlines()
@@ -48,17 +49,17 @@ install_requires = [r.strip() for r in requirements_lines]
 
 # now call setup
 setup(name='osmnx',
-      version='0.8dev',
-      description='Retrieve, construct, analyze, and visualize street networks from OpenStreetMap',
+      version='0.11dev',
+      description='Retrieve, model, analyze, and visualize OpenStreetMap street networks and other spatial data',
       long_description=long_description,
       classifiers=classifiers,
       url='https://github.com/gboeing/osmnx',
       author='Geoff Boeing',
-      author_email='gboeing@berkeley.edu',
+      author_email='boeing@usc.edu',
       license='MIT',
       platforms='any',
       packages=['osmnx'],
       install_requires=install_requires,
-      extras_require={'folium':['folium>=0.5'],
-                      'kdtree':['scipy>=1.0'],
+      extras_require={'folium':['folium>=0.6'],
+                      'kdtree':['scipy>=1.1'],
                       'balltree':['scikit-learn>=0.19']})

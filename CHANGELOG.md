@@ -1,5 +1,52 @@
 # Change log
 
+## 0.11 (T.B.D.)
+
+  - drop formal python 2 support
+
+## 0.10 (2019-05-08)
+
+  - remove deprecated buildings module
+  - filter steps ways out of bike queries
+  - convert CRS-handling to proj4 strings
+  - save graph to xml-formatted .osm file
+  - minor refactoring
+
+## 0.9 (2019-01-28)
+
+  - deprecate buildings module and replace with generalized footprints module
+  - improve handling of multipolygon footprints
+  - new function to find nearest edge(s), given coordinates
+  - add "search," "reverse," and "lookup" nominatim queries
+  - use unprojected graphs for figure-ground plotting functions
+  - allow non-integer osmid values for custom data
+  - improve get_route_edge_attributes function
+  - improve color mapping by node/edge attribute value
+  - make bidirectional network types explicit
+  - networkx compatibility fixes to resolve warnings
+
+## 0.8.2 (2018-09-19)
+
+  - add python 3.7 compatibility
+  - add convenience function to plot several routes over the same map
+  - optimize graph truncation to bounding box
+  - give self-loops a null bearing when calculating edge bearings
+  - make accept-language http header explicit and configurable
+  - add citation function
+  - refactor POI module
+
+## 0.8.1 (2018-05-17)
+
+  - add Gephi compatibility argument for saving GraphML
+  - handle square bracket encapsulated strings when loading GraphML
+
+## 0.8 (2018-05-05)
+
+  - add ability to retrieve points of interest
+  - improve performance for retrieving huge geographies' street networks
+  - fix building footprint retrieval query syntax
+  - minor bug fixes
+
 ## 0.7.4 (2018-04-05)
 
   - add fast nearest-nodes search
@@ -126,7 +173,7 @@
   - refactor modules
   - add graph to GDF and GDF to graph functions
   - add encoding argument to save_graph_shapefile
-  - add unit tests and continuous integration  
+  - add unit tests and continuous integration
 
 ## 0.1 (2016-12-19)
 

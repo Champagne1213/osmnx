@@ -136,7 +136,7 @@ def get_from_cache(url):
             return response_json
 
 
-def get_http_headers(user_agent=None, referer=None):
+def get_http_headers(user_agent=None, referer=None, accept_language=None):
     """
     Update the default requests HTTP headers with OSMnx info.
 
@@ -146,6 +146,8 @@ def get_http_headers(user_agent=None, referer=None):
         the user agent string, if None will set with OSMnx default
     referer : str
         the referer string, if None will set with OSMnx default
+    accept_language : str
+        make accept-language explicit e.g. for consistent nominatim result sorting
 
     Returns
     -------
@@ -153,12 +155,14 @@ def get_http_headers(user_agent=None, referer=None):
     """
 
     if user_agent is None:
-        user_agent = 'Python OSMnx package (https://github.com/gboeing/osmnx)'
+        user_agent = settings.default_user_agent
     if referer is None:
-        referer = 'Python OSMnx package (https://github.com/gboeing/osmnx)'
+        referer = settings.default_referer
+    if accept_language is None:
+        accept_language = settings.default_accept_language
 
     headers = requests.utils.default_headers()
-    headers.update({'User-Agent': user_agent, 'referer': referer})
+    headers.update({'User-Agent': user_agent, 'referer': referer, 'Accept-Language': accept_language})
     return headers
 
 
@@ -217,7 +221,7 @@ def get_pause_duration(recursive_delay=5, default_duration=10):
     return pause_duration
 
 
-def nominatim_request(params, pause_duration=1, timeout=30, error_pause_duration=180):
+def nominatim_request(params, type = "search", pause_duration=1, timeout=30, error_pause_duration=180):
     """
     Send a request to the Nominatim API via HTTP GET and return the JSON
     response.
@@ -226,6 +230,8 @@ def nominatim_request(params, pause_duration=1, timeout=30, error_pause_duration
     ----------
     params : dict or OrderedDict
         key-value pairs of parameters
+    type : string
+        Type of Nominatim query. One of the following: search, reverse or lookup
     pause_duration : int
         how long to pause before requests, in seconds
     timeout : int
@@ -238,11 +244,18 @@ def nominatim_request(params, pause_duration=1, timeout=30, error_pause_duration
     response_json : dict
     """
 
+    known_requests = {"search", "reverse", "lookup"}
+    if type not in known_requests:
+        raise ValueError("The type of Nominatim request is invalid. Please choose one of {{'search', 'reverse', 'lookup'}}")
+
     # prepare the Nominatim API URL and see if request already exists in the
     # cache
-    url = 'https://nominatim.openstreetmap.org/search'
+    url = settings.nominatim_endpoint.rstrip('/') + '/{}'.format(type)
     prepared_url = requests.Request('GET', url, params=params).prepare().url
     cached_response_json = get_from_cache(prepared_url)
+
+    if settings.nominatim_key:
+        params['key'] = settings.nominatim_key
 
     if cached_response_json is not None:
         # found this request in the cache, just return it instead of making a
@@ -259,7 +272,7 @@ def nominatim_request(params, pause_duration=1, timeout=30, error_pause_duration
 
         # get the response size and the domain, log result
         size_kb = len(response.content) / 1000.
-        domain = re.findall(r'//(?s)(.*?)/', url)[0]
+        domain = re.findall(r'(?s)//(.*?)/', url)[0]
         log('Downloaded {:,.1f}KB from {} in {:,.2f} seconds'.format(size_kb, domain, time.time()-start_time))
 
         try:
@@ -331,7 +344,7 @@ def overpass_request(data, pause_duration=None, timeout=180, error_pause_duratio
 
         # get the response size and the domain, log result
         size_kb = len(response.content) / 1000.
-        domain = re.findall(r'//(?s)(.*?)/', url)[0]
+        domain = re.findall(r'(?s)//(.*?)/', url)[0]
         log('Downloaded {:,.1f}KB from {} in {:,.2f} seconds'.format(size_kb, domain, time.time()-start_time))
 
         try:
@@ -531,14 +544,14 @@ def get_osm_filter(network_type):
     # are tagged as providing parking, driveway, private, or emergency-access
     # services
     filters['drive'] = ('["area"!~"yes"]["highway"!~"cycleway|footway|path|pedestrian|steps|track|corridor|'
-                        'proposed|construction|bridleway|abandoned|platform|raceway|service"]'
+                        'elevator|escalator|proposed|construction|bridleway|abandoned|platform|raceway|service"]'
                         '["motor_vehicle"!~"no"]["motorcar"!~"no"]{}'
                         '["service"!~"parking|parking_aisle|driveway|private|emergency_access"]').format(settings.default_access)
 
     # drive+service: allow ways tagged 'service' but filter out certain types of
     # service ways
     filters['drive_service'] = ('["area"!~"yes"]["highway"!~"cycleway|footway|path|pedestrian|steps|track|corridor|'
-                                'proposed|construction|bridleway|abandoned|platform|raceway"]'
+                                'elevator|escalator|proposed|construction|bridleway|abandoned|platform|raceway"]'
                                 '["motor_vehicle"!~"no"]["motorcar"!~"no"]{}'
                                 '["service"!~"parking|parking_aisle|private|emergency_access"]').format(settings.default_access)
 
@@ -552,7 +565,8 @@ def get_osm_filter(network_type):
 
     # biking: filter out foot ways, motor ways, private ways, and anything
     # specifying biking=no
-    filters['bike'] = ('["area"!~"yes"]["highway"!~"footway|corridor|motor|proposed|construction|abandoned|platform|raceway"]'
+    filters['bike'] = ('["area"!~"yes"]["highway"!~"footway|steps|corridor|elevator|escalator|motor|proposed|'
+                       'construction|abandoned|platform|raceway"]'
                        '["bicycle"!~"no"]["service"!~"private"]{}').format(settings.default_access)
 
     # to download all ways, just filter out everything not currently in use or
@@ -978,6 +992,7 @@ def truncate_graph_bbox(G, north, south, east, west, truncate_by_edge=False, ret
                     y = G.nodes[neighbor]['y']
                     if y < north and y > south and x < east and x > west:
                         any_neighbors_in_bbox = True
+                        break
 
                 # if none of its neighbors are within the bounding box, add node
                 # to list of nodes outside the bounding box
@@ -1041,7 +1056,7 @@ def quadrat_cut_geometry(geometry, quadrat_width, min_num=3, buffer_amount=1e-9)
     return multipoly
 
 
-def intersect_index_quadrats(gdf, geometry, quadrat_width=0.025, min_num=3, buffer_amount=1e-9):
+def intersect_index_quadrats(gdf, geometry, quadrat_width=0.05, min_num=3, buffer_amount=1e-9):
     """
     Intersect points with a polygon, using an r-tree spatial index and cutting
     the polygon up into smaller sub-polygons for r-tree acceleration.
@@ -1054,7 +1069,7 @@ def intersect_index_quadrats(gdf, geometry, quadrat_width=0.025, min_num=3, buff
         the geometry to intersect with the points
     quadrat_width : numeric
         the linear length (in degrees) of the quadrats with which to cut up the
-        geometry (default = 0.025, approx 2km at NYC's latitude)
+        geometry (default = 0.05, approx 4km at NYC's latitude)
     min_num : int
         the minimum number of linear quadrat lines (e.g., min_num=3 would
         produce a quadrat grid of 4 squares)
@@ -1110,7 +1125,7 @@ def intersect_index_quadrats(gdf, geometry, quadrat_width=0.025, min_num=3, buff
     return points_within_geometry
 
 
-def truncate_graph_polygon(G, polygon, retain_all=False, truncate_by_edge=False, quadrat_width=0.025, min_num=3, buffer_amount=1e-9):
+def truncate_graph_polygon(G, polygon, retain_all=False, truncate_by_edge=False, quadrat_width=0.05, min_num=3, buffer_amount=1e-9):
     """
     Remove every node in graph that falls outside some shapely Polygon or
     MultiPolygon.
@@ -1127,8 +1142,8 @@ def truncate_graph_polygon(G, polygon, retain_all=False, truncate_by_edge=False,
         neighbors are within polygon (NOT CURRENTLY IMPLEMENTED)
     quadrat_width : numeric
         passed on to intersect_index_quadrats: the linear length (in degrees) of
-        the quadrats with which to cut up the geometry (default = 0.025, approx
-        2km at NYC's latitude)
+        the quadrats with which to cut up the geometry (default = 0.05, approx
+        4km at NYC's latitude)
     min_num : int
         passed on to intersect_index_quadrats: the minimum number of linear
         quadrat lines (e.g., min_num=3 would produce a quadrat grid of 4
@@ -1245,7 +1260,7 @@ def add_path(G, data, one_way):
         G.add_edges_from(path_edges_opposite_direction, **data)
 
 
-def add_paths(G, paths, network_type):
+def add_paths(G, paths, bidirectional=False):
     """
     Add a collection of paths to the graph.
 
@@ -1254,8 +1269,9 @@ def add_paths(G, paths, network_type):
     G : networkx multidigraph
     paths : dict
         the paths from OSM
-    network_type : string
-        {'all', 'walk', 'drive', etc}, what type of network
+    bidirectional : bool
+        if True, create bidirectional edges for one-way streets
+
 
     Returns
     -------
@@ -1269,7 +1285,7 @@ def add_paths(G, paths, network_type):
 
         # if this path is tagged as one-way and if it is not a walking network,
         # then we'll add the path in one direction only
-        if ('oneway' in data and data['oneway'] in osm_oneway_values) and not network_type=='walk':
+        if ('oneway' in data and data['oneway'] in osm_oneway_values) and not bidirectional:
             if data['oneway'] == '-1':
                 # paths with a one-way value of -1 are one-way, but in the
                 # reverse direction of the nodes' order, see osm documentation
@@ -1277,7 +1293,7 @@ def add_paths(G, paths, network_type):
             # add this path (in only one direction) to the graph
             add_path(G, data, one_way=True)
 
-        elif ('junction' in data and data['junction'] == 'roundabout') and not network_type == 'walk':
+        elif ('junction' in data and data['junction'] == 'roundabout') and not bidirectional:
             # roundabout are also oneway but not tagged as is
             add_path(G, data, one_way=True)
 
@@ -1293,9 +1309,9 @@ def add_paths(G, paths, network_type):
     return G
 
 
-def create_graph(response_jsons, name='unnamed', retain_all=False, network_type='all_private'):
+def create_graph(response_jsons, name='unnamed', retain_all=False, bidirectional=False):
     """
-    Create a networkx graph from OSM data.
+    Create a networkx graph from Overpass API HTTP response objects.
 
     Parameters
     ----------
@@ -1305,8 +1321,8 @@ def create_graph(response_jsons, name='unnamed', retain_all=False, network_type=
         the name of the graph
     retain_all : bool
         if True, return the entire graph even if it is not connected
-    network_type : string
-        what type of network to create
+    bidirectional : bool
+        if True, create bidirectional edges for one-way streets
 
     Returns
     -------
@@ -1341,7 +1357,7 @@ def create_graph(response_jsons, name='unnamed', retain_all=False, network_type=
         G.add_node(node, **data)
 
     # add each osm way (aka, path) to the graph
-    G = add_paths(G, paths, network_type)
+    G = add_paths(G, paths, bidirectional=bidirectional)
 
     # retain only the largest connected component, if caller did not
     # set retain_all=True
@@ -1469,7 +1485,8 @@ def graph_from_bbox(north, south, east, west, network_type='all_private',
                                           network_type=network_type, timeout=timeout,
                                           memory=memory, max_query_area_size=max_query_area_size,
                                           infrastructure=infrastructure, custom_filter=custom_filter)
-        G_buffered = create_graph(response_jsons, name=name, retain_all=retain_all, network_type=network_type)
+        G_buffered = create_graph(response_jsons, name=name, retain_all=retain_all,
+                                  bidirectional=network_type in settings.bidirectional_network_types)
         G = truncate_graph_bbox(G_buffered, north, south, east, west, retain_all=True, truncate_by_edge=truncate_by_edge)
 
         # simplify the graph topology
@@ -1493,7 +1510,8 @@ def graph_from_bbox(north, south, east, west, network_type='all_private',
                                           infrastructure=infrastructure, custom_filter=custom_filter)
 
         # create the graph, then truncate to the bounding box
-        G = create_graph(response_jsons, name=name, retain_all=retain_all, network_type=network_type)
+        G = create_graph(response_jsons, name=name, retain_all=retain_all,
+                         bidirectional=network_type in settings.bidirectional_network_types)
         G = truncate_graph_bbox(G, north, south, east, west, retain_all=retain_all, truncate_by_edge=truncate_by_edge)
 
         # simplify the graph topology as the last step. don't truncate after
@@ -1570,8 +1588,8 @@ def graph_from_point(center_point, distance=1000, distance_type='bbox',
 
     # create a graph from the bounding box
     G = graph_from_bbox(north, south, east, west, network_type=network_type, simplify=simplify,
-                        retain_all=retain_all, truncate_by_edge=truncate_by_edge, name=name, 
-                        timeout=timeout, memory=memory, max_query_area_size=max_query_area_size, 
+                        retain_all=retain_all, truncate_by_edge=truncate_by_edge, name=name,
+                        timeout=timeout, memory=memory, max_query_area_size=max_query_area_size,
                         clean_periphery=clean_periphery, infrastructure=infrastructure,
                         custom_filter=custom_filter)
 
@@ -1702,7 +1720,7 @@ def graph_from_polygon(polygon, network_type='all_private', simplify=True,
         requested, then simplify, then truncate it to requested spatial extent
     infrastructure : string
         download infrastructure of given type (default is streets
-        (ie, 'way["highway"]') but other infrastructures may be selected 
+        (ie, 'way["highway"]') but other infrastructures may be selected
         like power grids (ie, 'way["power"~"line"]'))
     custom_filter : string
         a custom network filter to be used instead of the network_type presets
@@ -1735,7 +1753,8 @@ def graph_from_polygon(polygon, network_type='all_private', simplify=True,
                                           timeout=timeout, memory=memory,
                                           max_query_area_size=max_query_area_size,
                                           infrastructure=infrastructure, custom_filter=custom_filter)
-        G_buffered = create_graph(response_jsons, name=name, retain_all=True, network_type=network_type)
+        G_buffered = create_graph(response_jsons, name=name, retain_all=True,
+                                  bidirectional=network_type in settings.bidirectional_network_types)
         G_buffered = truncate_graph_polygon(G_buffered, polygon_buffered, retain_all=True, truncate_by_edge=truncate_by_edge)
 
         # simplify the graph topology
@@ -1761,7 +1780,8 @@ def graph_from_polygon(polygon, network_type='all_private', simplify=True,
                                           infrastructure=infrastructure, custom_filter=custom_filter)
 
         # create the graph from the downloaded data
-        G = create_graph(response_jsons, name=name, retain_all=True, network_type=network_type)
+        G = create_graph(response_jsons, name=name, retain_all=True,
+                         bidirectional=network_type in settings.bidirectional_network_types)
 
         # truncate the graph to the extent of the polygon
         G = truncate_graph_polygon(G, polygon, retain_all=retain_all, truncate_by_edge=truncate_by_edge)
@@ -1865,7 +1885,7 @@ def graph_from_place(query, network_type='all_private', simplify=True,
     return G
 
 
-def graph_from_file(filename, network_type='all_private', simplify=True,
+def graph_from_file(filename, bidirectional=False, simplify=True,
                     retain_all=False, name='unnamed'):
     """
     Create a networkx graph from OSM data in an XML file.
@@ -1874,10 +1894,10 @@ def graph_from_file(filename, network_type='all_private', simplify=True,
     ----------
     filename : string
         the name of a file containing OSM XML data
-    network_type : string
-        what type of street network to get
+    bidirectional : bool
+        if True, create bidirectional edges for one-way streets
     simplify : bool
-        if true, simplify the graph topology
+        if True, simplify the graph topology
     retain_all : bool
         if True, return the entire graph even if it is not connected
     name : string
@@ -1889,14 +1909,14 @@ def graph_from_file(filename, network_type='all_private', simplify=True,
     """
     # transmogrify file of OSM XML data into JSON
     response_jsons = [overpass_json_from_file(filename)]
-    
+
     # create graph using this response JSON
-    G = create_graph(response_jsons, network_type=network_type,
+    G = create_graph(response_jsons, bidirectional=bidirectional,
                      retain_all=retain_all, name=name)
 
     # simplify the graph topology as the last step.
     if simplify:
         G = simplify_graph(G)
-    
+
     log('graph_from_file() returning graph with {:,} nodes and {:,} edges'.format(len(list(G.nodes())), len(list(G.edges()))))
     return G

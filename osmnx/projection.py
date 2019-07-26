@@ -99,7 +99,7 @@ def project_gdf(gdf, to_crs=None, to_latlong=False):
         else:
             # else, project the gdf to UTM
             # if GeoDataFrame is already in UTM, just return it
-            if (gdf.crs is not None) and ('proj' in gdf.crs) and (gdf.crs['proj'] == 'utm'):
+            if (gdf.crs is not None) and ('+proj=utm ' in gdf.crs):
                 return gdf
 
             # calculate the centroid of the union of all the geometries in the
@@ -109,11 +109,7 @@ def project_gdf(gdf, to_crs=None, to_latlong=False):
             # calculate the UTM zone from this avg longitude and define the UTM
             # CRS to project
             utm_zone = int(math.floor((avg_longitude + 180) / 6.) + 1)
-            utm_crs = {'datum': 'WGS84',
-                       'ellps': 'WGS84',
-                       'proj' : 'utm',
-                       'zone' : utm_zone,
-                       'units': 'm'}
+            utm_crs = '+proj=utm +zone={} +ellps=WGS84 +datum=WGS84 +units=m +no_defs'.format(utm_zone)
 
             # project the GeoDataFrame to the UTM CRS
             projected_gdf = gdf.to_crs(utm_crs)
@@ -144,11 +140,10 @@ def project_graph(G, to_crs=None):
     start_time = time.time()
 
     # create a GeoDataFrame of the nodes, name it, convert osmid to str
-    nodes = {node:data for node, data in G_proj.nodes(data=True)}
-    gdf_nodes = gpd.GeoDataFrame(nodes).T
+    nodes, data = zip(*G_proj.nodes(data=True))
+    gdf_nodes = gpd.GeoDataFrame(list(data), index=nodes)
     gdf_nodes.crs = G_proj.graph['crs']
     gdf_nodes.gdf_name = '{}_nodes'.format(G_proj.name)
-    gdf_nodes['osmid'] = gdf_nodes['osmid'].astype(np.int64).map(make_str)
 
     # create new lat/lon columns just to save that data for later, and create a
     # geometry column from x/y

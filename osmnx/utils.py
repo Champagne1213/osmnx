@@ -23,7 +23,12 @@ import warnings
 import xml.sax
 from collections import Counter
 from itertools import chain
-from shapely.geometry import Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
+from shapely.geometry import Point
+from shapely.geometry import MultiPoint
+from shapely.geometry import LineString
+from shapely.geometry import MultiLineString
+from shapely.geometry import MultiPolygon
+from shapely.geometry import Polygon
 
 from . import settings
 
@@ -37,8 +42,6 @@ try:
 except ImportError as e:
     BallTree = None
 
-
-
 def config(data_folder=settings.data_folder,
            logs_folder=settings.logs_folder,
            imgs_folder=settings.imgs_folder,
@@ -51,8 +54,17 @@ def config(data_folder=settings.data_folder,
            log_filename=settings.log_filename,
            useful_tags_node=settings.useful_tags_node,
            useful_tags_path=settings.useful_tags_path,
+           osm_xml_node_attrs=settings.osm_xml_node_attrs,
+           osm_xml_node_tags=settings.osm_xml_node_tags,
+           osm_xml_way_attrs=settings.osm_xml_way_attrs,
+           osm_xml_way_tags=settings.osm_xml_way_tags,
            default_access=settings.default_access,
-           default_crs=settings.default_crs):
+           default_crs=settings.default_crs,
+           default_user_agent=settings.default_user_agent,
+           default_referer=settings.default_referer,
+           default_accept_language=settings.default_accept_language,
+           nominatim_endpoint=settings.nominatim_endpoint,
+           nominatim_key=settings.nominatim_key):
     """
     Configure osmnx by setting the default global vars to desired values.
 
@@ -85,6 +97,16 @@ def config(data_folder=settings.data_folder,
         default filter for OSM "access" key
     default_crs : string
         default CRS to set when creating graphs
+    default_user_agent : string
+        HTTP header user-agent
+    default_referer : string
+        HTTP header referer
+    default_accept_language : string
+        HTTP header accept-language
+    nominatim_endpoint : string
+        which API endpoint to use for nominatim queries
+    nominatim_key : string
+        your API key, if you are using an endpoint that requires one
 
     Returns
     -------
@@ -104,14 +126,23 @@ def config(data_folder=settings.data_folder,
     settings.log_filename = log_filename
     settings.useful_tags_node = useful_tags_node
     settings.useful_tags_path = useful_tags_path
-    settings.useful_tags_node = useful_tags_node
+    settings.useful_tags_node = list(set(useful_tags_node + osm_xml_node_attrs + osm_xml_node_tags))
+    settings.useful_tags_path = list(set(useful_tags_path + osm_xml_way_attrs + osm_xml_way_tags))
+    settings.osm_xml_node_attrs = osm_xml_node_attrs
+    settings.osm_xml_node_tags = osm_xml_node_tags
+    settings.osm_xml_way_attrs = osm_xml_way_attrs
+    settings.osm_xml_way_tags = osm_xml_way_tags
     settings.default_access = default_access
     settings.default_crs = default_crs
+    settings.default_user_agent = default_user_agent
+    settings.default_referer = default_referer
+    settings.default_accept_language = default_accept_language
+    settings.nominatim_endpoint = nominatim_endpoint
+    settings.nominatim_key = nominatim_key
 
     # if logging is turned on, log that we are configured
     if settings.log_file or settings.log_console:
         log('Configured osmnx')
-
 
 
 def log(message, level=None, name=None, filename=None):
@@ -263,9 +294,9 @@ def induce_subgraph(G, node_subset):
     node_subset = set(node_subset)
 
     # copy nodes into new graph
-    G2 = G.fresh_copy()
+    G2 = G.__class__()
     G2.add_nodes_from((n, G.nodes[n]) for n in node_subset)
-    
+
     # copy edges to new graph, including parallel edges
     if G2.is_multigraph:
         G2.add_edges_from((n, nbr, key, d)
@@ -276,7 +307,7 @@ def induce_subgraph(G, node_subset):
         G2.add_edges_from((n, nbr, d)
             for n, nbrs in G.adj.items() if n in node_subset
             for nbr, d in nbrs.items() if nbr in node_subset)
-    
+
     # update graph attribute dict, and return graph
     G2.graph.update(G.graph)
     return G2
@@ -307,24 +338,24 @@ def get_largest_component(G, strongly=False):
     if strongly:
         # if the graph is not connected retain only the largest strongly connected component
         if not nx.is_strongly_connected(G):
-            
+
             # get all the strongly connected components in graph then identify the largest
             sccs = nx.strongly_connected_components(G)
             largest_scc = max(sccs, key=len)
             G = induce_subgraph(G, largest_scc)
-            
+
             msg = ('Graph was not connected, retained only the largest strongly '
                    'connected component ({:,} of {:,} total nodes) in {:.2f} seconds')
             log(msg.format(len(list(G.nodes())), original_len, time.time()-start_time))
     else:
         # if the graph is not connected retain only the largest weakly connected component
         if not nx.is_weakly_connected(G):
-            
+
             # get all the weakly connected components in graph then identify the largest
             wccs = nx.weakly_connected_components(G)
             largest_wcc = max(wccs, key=len)
             G = induce_subgraph(G, largest_wcc)
-            
+
             msg = ('Graph was not connected, retained only the largest weakly '
                    'connected component ({:,} of {:,} total nodes) in {:.2f} seconds')
             log(msg.format(len(list(G.nodes())), original_len, time.time()-start_time))
@@ -363,7 +394,7 @@ def great_circle_vec(lat1, lng1, lat2, lng2, earth_radius=6371009):
     theta2 = np.deg2rad(lng2)
     d_theta = theta2 - theta1
 
-    h = np.sin(d_phi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(d_theta / 2) ** 2 
+    h = np.sin(d_phi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(d_theta / 2) ** 2
     h = np.minimum(1.0, h) # protect against floating point errors
 
     arc = 2 * np.arcsin(np.sqrt(h))
@@ -427,13 +458,13 @@ def get_nearest_node(G, point, method='haversine', return_dist=False):
         if euclidean) between the point and nearest node
     """
     start_time = time.time()
-    
+
     if not G or (G.number_of_nodes() == 0):
         raise ValueError('G argument must be not be empty or should contain at least one node')
 
     # dump graph node coordinates into a pandas dataframe indexed by node id
     # with x and y columns
-    coords = np.array([[node, data['x'], data['y']] for node, data in G.nodes(data=True)])
+    coords = [[node, data['x'], data['y']] for node, data in G.nodes(data=True)]
     df = pd.DataFrame(coords, columns=['node', 'x', 'y']).set_index('node')
 
     # add columns to the dataframe representing the (constant) coordinates of
@@ -462,7 +493,7 @@ def get_nearest_node(G, point, method='haversine', return_dist=False):
         raise ValueError('method argument must be either "haversine" or "euclidean"')
 
     # nearest node's ID is the index label of the minimum distance
-    nearest_node = int(distances.idxmin())
+    nearest_node = distances.idxmin()
     log('Found nearest node ({}) to point {} in {:,.2f} seconds'.format(nearest_node, point, time.time()-start_time))
 
     # if caller requested return_dist, return distance between the point and the
@@ -473,6 +504,51 @@ def get_nearest_node(G, point, method='haversine', return_dist=False):
         return nearest_node
 
 
+def get_nearest_edge(G, point):
+    """
+    Return the nearest edge to a pair of coordinates. Pass in a graph and a tuple
+    with the coordinates. We first get all the edges in the graph. Secondly we compute
+    the euclidean distance from the coordinates to the segments determined by each edge.
+    The last step is to sort the edge segments in ascending order based on the distance
+    from the coordinates to the edge. In the end, the first element in the list of edges
+    will be the closest edge that we will return as a tuple containing the shapely
+    geometry and the u, v nodes.
+
+    Parameters
+    ----------
+    G : networkx multidigraph
+    point : tuple
+        The (lat, lng) or (y, x) point for which we will find the nearest edge
+        in the graph
+
+    Returns
+    -------
+    closest_edge_to_point : tuple (shapely.geometry, u, v)
+        A geometry object representing the segment and the coordinates of the two
+        nodes that determine the edge section, u and v, the OSM ids of the nodes.
+    """
+    start_time = time.time()
+
+    gdf = graph_to_gdfs(G, nodes=False, fill_edge_geometry=True)
+    graph_edges = gdf[["geometry", "u", "v"]].values.tolist()
+
+    edges_with_distances = [
+        (
+            graph_edge,
+            Point(tuple(reversed(point))).distance(graph_edge[0])
+        )
+        for graph_edge in graph_edges
+    ]
+
+    edges_with_distances = sorted(edges_with_distances, key=lambda x: x[1])
+    closest_edge_to_point = edges_with_distances[0][0]
+
+    geometry, u, v = closest_edge_to_point
+
+    log('Found nearest edge ({}) to point {} in {:,.2f} seconds'.format((u, v), point, time.time() - start_time))
+
+    return geometry, u, v
+
 
 def get_nearest_nodes(G, X, Y, method=None):
     """
@@ -481,9 +557,9 @@ def get_nearest_nodes(G, X, Y, method=None):
     is by far the fastest with large data sets, but only finds approximate
     nearest nodes if working in unprojected coordinates like lat-lng (it
     precisely finds the nearest node if working in projected coordinates).
-    The 'balltree' method is second fastest with large data sets, but it 
+    The 'balltree' method is second fastest with large data sets, but it
     is precise if working in unprojected coordinates like lat-lng.
-    
+
     Parameters
     ----------
     G : networkx multidigraph
@@ -495,47 +571,47 @@ def get_nearest_nodes(G, X, Y, method=None):
         node in the graph
     method : str {None, 'kdtree', 'balltree'}
         Which method to use for finding nearest node to each point.
-        If None, we manually find each node one at a time using 
-        osmnx.utils.get_nearest_node and haversine. If 'kdtree' we use 
+        If None, we manually find each node one at a time using
+        osmnx.utils.get_nearest_node and haversine. If 'kdtree' we use
         scipy.spatial.cKDTree for very fast euclidean search. If
-        'balltree', we use sklearn.neighbors.BallTree for fast 
+        'balltree', we use sklearn.neighbors.BallTree for fast
         haversine search.
-        
+
     Returns
     -------
     nn : array
         list of nearest node IDs
     """
-    
+
     start_time = time.time()
 
     if method is None:
-        
+
         # calculate nearest node one at a time for each point
         nn = [get_nearest_node(G, (y, x), method='haversine') for x, y in zip(X, Y)]
-    
+
     elif method == 'kdtree':
-        
+
         # check if we were able to import scipy.spatial.cKDTree successfully
         if not cKDTree:
             raise ImportError('The scipy package must be installed to use this optional feature.')
-        
+
         # build a k-d tree for euclidean nearest node search
         nodes = pd.DataFrame({'x':nx.get_node_attributes(G, 'x'),
                               'y':nx.get_node_attributes(G, 'y')})
         tree = cKDTree(data=nodes[['x', 'y']], compact_nodes=True, balanced_tree=True)
-        
+
         # query the tree for nearest node to each point
         points = np.array([X, Y]).T
         dist, idx = tree.query(points, k=1)
         nn = nodes.iloc[idx].index
-        
+
     elif method == 'balltree':
-        
+
         # check if we were able to import sklearn.neighbors.BallTree successfully
         if not BallTree:
             raise ImportError('The scikit-learn package must be installed to use this optional feature.')
-        
+
         # haversine requires data in form of [lat, lng] and inputs/outputs in units of radians
         nodes = pd.DataFrame({'x':nx.get_node_attributes(G, 'x'),
                               'y':nx.get_node_attributes(G, 'y')})
@@ -549,7 +625,7 @@ def get_nearest_nodes(G, X, Y, method=None):
         # query the tree for nearest node to each point
         idx = tree.query(points_rad, k=1, return_distance=False)
         nn = nodes.iloc[idx[:,0]].index
-    
+
     else:
         raise ValueError('You must pass a valid method name, or None.')
 
@@ -557,6 +633,166 @@ def get_nearest_nodes(G, X, Y, method=None):
 
     return np.array(nn)
 
+
+def get_nearest_edges(G, X, Y, method=None, dist=0.0001):
+    """
+    Return the graph edges nearest to a list of points. Pass in points
+    as separate vectors of X and Y coordinates. The 'kdtree' method
+    is by far the fastest with large data sets, but only finds approximate
+    nearest edges if working in unprojected coordinates like lat-lng (it
+    precisely finds the nearest edge if working in projected coordinates).
+    The 'balltree' method is second fastest with large data sets, but it
+    is precise if working in unprojected coordinates like lat-lng.
+
+    Parameters
+    ----------
+    G : networkx multidigraph
+    X : list-like
+        The vector of longitudes or x's for which we will find the nearest
+        edge in the graph. For projected graphs, use the projected coordinates,
+        usually in meters.
+    Y : list-like
+        The vector of latitudes or y's for which we will find the nearest
+        edge in the graph. For projected graphs, use the projected coordinates,
+        usually in meters.
+    method : str {None, 'kdtree', 'balltree'}
+        Which method to use for finding nearest edge to each point.
+        If None, we manually find each edge one at a time using
+        osmnx.utils.get_nearest_edge. If 'kdtree' we use
+        scipy.spatial.cKDTree for very fast euclidean search. Recommended for
+        projected graphs. If 'balltree', we use sklearn.neighbors.BallTree for
+        fast haversine search. Recommended for unprojected graphs.
+
+    dist : float
+        spacing length along edges. Units are the same as the geom; Degrees for
+        unprojected geometries and meters for projected geometries. The smaller
+        the value, the more points are created.
+
+    Returns
+    -------
+    ne : ndarray
+        array of nearest edges represented by their startpoint and endpoint ids,
+        u and v, the OSM ids of the nodes.
+
+    Info
+    ----
+    The method creates equally distanced points along the edges of the network.
+    Then, these points are used in a kdTree or BallTree search to identify which
+    is nearest.Note that this method will not give the exact perpendicular point
+    along the edge, but the smaller the *dist* parameter, the closer the solution
+    will be.
+
+    Code is adapted from an answer by JHuw from this original question:
+    https://gis.stackexchange.com/questions/222315/geopandas-find-nearest-point
+    -in-other-dataframe
+    """
+    start_time = time.time()
+
+    if method is None:
+        # calculate nearest edge one at a time for each point
+        ne = [get_nearest_edge(G, (x, y)) for x, y in zip(X, Y)]
+        ne = [(u, v) for _, u, v in ne]
+
+    elif method == 'kdtree':
+
+        # check if we were able to import scipy.spatial.cKDTree successfully
+        if not cKDTree:
+            raise ImportError('The scipy package must be installed to use this optional feature.')
+
+        # transform graph into DataFrame
+        edges = graph_to_gdfs(G, nodes=False, fill_edge_geometry=True)
+
+        # transform edges into evenly spaced points
+        edges['points'] = edges.apply(lambda x: redistribute_vertices(x.geometry, dist), axis=1)
+
+        # develop edges data for each created points
+        extended = edges['points'].apply([pd.Series]).stack().reset_index(level=1, drop=True).join(edges).reset_index()
+
+        # Prepare btree arrays
+        nbdata = np.array(list(zip(extended['Series'].apply(lambda x: x.x),
+                                   extended['Series'].apply(lambda x: x.y))))
+
+        # build a k-d tree for euclidean nearest node search
+        btree = cKDTree(data=nbdata, compact_nodes=True, balanced_tree=True)
+
+        # query the tree for nearest node to each point
+        points = np.array([X, Y]).T
+        dist, idx = btree.query(points, k=1)  # Returns ids of closest point
+        eidx = extended.loc[idx, 'index']
+        ne = edges.loc[eidx, ['u', 'v']]
+
+    elif method == 'balltree':
+
+        # check if we were able to import sklearn.neighbors.BallTree successfully
+        if not BallTree:
+            raise ImportError('The scikit-learn package must be installed to use this optional feature.')
+
+        # transform graph into DataFrame
+        edges = graph_to_gdfs(G, nodes=False, fill_edge_geometry=True)
+
+        # transform edges into evenly spaced points
+        edges['points'] = edges.apply(lambda x: redistribute_vertices(x.geometry, dist), axis=1)
+
+        # develop edges data for each created points
+        extended = edges['points'].apply([pd.Series]).stack().reset_index(level=1, drop=True).join(edges).reset_index()
+
+        # haversine requires data in form of [lat, lng] and inputs/outputs in units of radians
+        nodes = pd.DataFrame({'x': extended['Series'].apply(lambda x: x.x),
+                              'y': extended['Series'].apply(lambda x: x.y)})
+        nodes_rad = np.deg2rad(nodes[['y', 'x']].values.astype(np.float))
+        points = np.array([Y, X]).T
+        points_rad = np.deg2rad(points)
+
+        # build a ball tree for haversine nearest node search
+        tree = BallTree(nodes_rad, metric='haversine')
+
+        # query the tree for nearest node to each point
+        idx = tree.query(points_rad, k=1, return_distance=False)
+        eidx = extended.loc[idx[:, 0], 'index']
+        ne = edges.loc[eidx, ['u', 'v']]
+
+    else:
+        raise ValueError('You must pass a valid method name, or None.')
+
+    log('Found nearest edges to {:,} points in {:,.2f} seconds'.format(len(X), time.time() - start_time))
+
+    return np.array(ne)
+
+
+def redistribute_vertices(geom, dist):
+    """
+    Redistribute the vertices on a projected LineString or MultiLineString. The distance
+    argument is only approximate since the total distance of the linestring may not be
+    a multiple of the preferred distance. This function works on only [Multi]LineString
+    geometry types.
+
+    This code is adapted from an answer by Mike T from this original question:
+    https://stackoverflow.com/questions/34906124/interpolating-every-x-distance-along-multiline-in-shapely
+
+    Parameters
+    ----------
+    geom : LineString or MultiLineString
+        a Shapely geometry
+    dist : float
+        spacing length along edges. Units are the same as the geom; Degrees for unprojected geometries and meters
+        for projected geometries. The smaller the value, the more points are created.
+
+    Returns
+    -------
+        list of Point geometries : list
+    """
+    if geom.geom_type == 'LineString':
+        num_vert = int(round(geom.length / dist))
+        if num_vert == 0:
+            num_vert = 1
+        return [geom.interpolate(float(n) / num_vert, normalized=True)
+                for n in range(num_vert + 1)]
+    elif geom.geom_type == 'MultiLineString':
+        parts = [redistribute_vertices(part, dist)
+                 for part in geom]
+        return type(geom)([p for p in parts if not p.is_empty])
+    else:
+        raise ValueError('unhandled geometry {}'.format(geom.geom_type))
 
 
 def get_bearing(origin_point, destination_point):
@@ -612,14 +848,19 @@ def add_edge_bearings(G):
     """
 
     for u, v, data in G.edges(keys=False, data=True):
-        
-        # calculate bearing from edge's origin to its destination
-        origin_point = (G.nodes[u]['y'], G.nodes[u]['x'])
-        destination_point = (G.nodes[v]['y'], G.nodes[v]['x'])
-        bearing = get_bearing(origin_point, destination_point)
-        
-        # round to thousandth of a degree
-        data['bearing'] = round(bearing, 3)
+
+        if u == v:
+            # a self-loop has an undefined compass bearing
+            data['bearing'] = np.nan
+
+        else:
+            # calculate bearing from edge's origin to its destination
+            origin_point = (G.nodes[u]['y'], G.nodes[u]['x'])
+            destination_point = (G.nodes[v]['y'], G.nodes[v]['x'])
+            bearing = get_bearing(origin_point, destination_point)
+
+            # round to thousandth of a degree
+            data['bearing'] = round(bearing, 3)
 
     return G
 
@@ -658,7 +899,7 @@ def geocode(query):
 
 
 
-def get_route_edge_attributes(G, route, attribute, minimize_key='length'):
+def get_route_edge_attributes(G, route, attribute=None, minimize_key='length', retrieve_default=None):
     """
     Get a list of attribute values for each edge in a path.
 
@@ -668,11 +909,14 @@ def get_route_edge_attributes(G, route, attribute, minimize_key='length'):
     route : list
         list of nodes in the path
     attribute : string
-        the name of the attribute to get the value of for each edge
+        the name of the attribute to get the value of for each edge.
+        If not specified, the complete data dict is returned for each edge.
     minimize_key : string
         if there are parallel edges between two nodes, select the one with the
         lowest value of minimize_key
-
+    retrieve_default : Callable[Tuple[Any, Any], Any]
+        Function called with the edge nodes as parameters to retrieve a default value, if the edge does not
+        contain the given attribute. Per default, a `KeyError` is raised
     Returns
     -------
     attribute_values : list
@@ -684,7 +928,13 @@ def get_route_edge_attributes(G, route, attribute, minimize_key='length'):
         # if there are parallel edges between two nodes, select the one with the
         # lowest value of minimize_key
         data = min(G.get_edge_data(u, v).values(), key=lambda x: x[minimize_key])
-        attribute_values.append(data[attribute])
+        if attribute is None:
+            attribute_value = data
+        elif retrieve_default is not None:
+            attribute_value = data.get(attribute, retrieve_default(u, v))
+        else:
+            attribute_value = data[attribute]
+        attribute_values.append(attribute_value)
     return attribute_values
 
 
@@ -772,7 +1022,7 @@ def round_polygon_coords(p, precision):
     new_poly : shapely Polygon
         the polygon with rounded coordinates
     """
-    
+
     # round the coordinates of the Polygon exterior
     new_exterior = [[round(x, precision) for x in c] for c in p.exterior.coords]
 
@@ -780,7 +1030,7 @@ def round_polygon_coords(p, precision):
     new_interiors = []
     for interior in p.interiors:
         new_interiors.append([[round(x, precision) for x in c] for c in interior.coords])
-    
+
     # construct a new Polygon with the rounded coordinates
     # buffer by zero to clean self-touching or self-crossing polygons
     new_poly = Polygon(shell=new_exterior, holes=new_interiors).buffer(0)
@@ -803,7 +1053,7 @@ def round_multipolygon_coords(mp, precision):
     -------
     MultiPolygon
     """
-    
+
     return MultiPolygon([round_polygon_coords(p, precision) for p in mp])
 
 
@@ -823,7 +1073,7 @@ def round_point_coords(pt, precision):
     -------
     Point
     """
-    
+
     return Point([round(x, precision) for x in pt.coords[0]])
 
 
@@ -843,7 +1093,7 @@ def round_multipoint_coords(mpt, precision):
     -------
     MultiPoint
     """
-    
+
     return MultiPoint([round_point_coords(pt, precision) for pt in mpt])
 
 
@@ -863,7 +1113,7 @@ def round_linestring_coords(ls, precision):
     -------
     LineString
     """
-    
+
     return LineString([[round(x, precision) for x in c] for c in ls.coords])
 
 
@@ -883,7 +1133,7 @@ def round_multilinestring_coords(mls, precision):
     -------
     MultiLineString
     """
-    
+
     return MultiLineString([round_linestring_coords(ls, precision) for ls in mls])
 
 
@@ -904,25 +1154,25 @@ def round_shape_coords(shape, precision):
     -------
     shapely geometry
     """
-    
+
     if isinstance(shape, Point):
         return round_point_coords(shape, precision)
-    
+
     elif isinstance(shape, MultiPoint):
         return round_multipoint_coords(shape, precision)
-    
+
     elif isinstance(shape, LineString):
         return round_linestring_coords(shape, precision)
-    
+
     elif isinstance(shape, MultiLineString):
         return round_multilinestring_coords(shape, precision)
-    
+
     elif isinstance(shape, Polygon):
         return round_polygon_coords(shape, precision)
-    
+
     elif isinstance(shape, MultiPolygon):
         return round_multipolygon_coords(shape, precision)
-    
+
     else:
         raise TypeError('cannot round coordinates of unhandled geometry type: {}'.format(type(shape)))
 
@@ -931,7 +1181,7 @@ def round_shape_coords(shape, precision):
 class OSMContentHandler (xml.sax.handler.ContentHandler):
     """
     SAX content handler for OSM XML.
-    
+
     Used to build an Overpass-like response JSON object in self.object. For format
     notes, see http://wiki.openstreetmap.org/wiki/OSM_XML#OSM_XML_file_format_notes
     and http://overpass-api.de/output_formats.html#json
@@ -945,20 +1195,20 @@ class OSMContentHandler (xml.sax.handler.ContentHandler):
         if name == 'osm':
             self.object.update({k: attrs[k] for k in attrs.keys()
                 if k in ('version', 'generator')})
-        
+
         elif name in ('node', 'way'):
             self._element = dict(type=name, tags={}, nodes=[], **attrs)
             self._element.update({k: float(attrs[k]) for k in attrs.keys()
                 if k in ('lat', 'lon')})
             self._element.update({k: int(attrs[k]) for k in attrs.keys()
                 if k in ('id', 'uid', 'version', 'changeset')})
-        
+
         elif name == 'tag':
             self._element['tags'].update({attrs['k']: attrs['v']})
-        
+
         elif name == 'nd':
             self._element['nodes'].append(int(attrs['ref']))
-        
+
         elif name == 'relation':
             # Placeholder for future relation support.
             # Look for nested members and tags.
@@ -985,16 +1235,56 @@ def overpass_json_from_file(filename):
     """
 
     _, ext = os.path.splitext(filename)
-    
+
     if ext == '.bz2':
         # Use Python 2/3 compatible BZ2File()
         opener = lambda fn: bz2.BZ2File(fn)
     else:
         # Assume an unrecognized file extension is just XML
         opener = lambda fn: open(fn, mode='rb')
-    
+
     with opener(filename) as file:
         handler = OSMContentHandler()
         xml.sax.parse(file, handler)
-
         return handler.object
+
+
+
+def bbox_to_poly(north, south, east, west):
+    """
+    Convenience function to parse bbox -> poly
+    """
+
+    return Polygon([(west, south), (east, south), (east, north), (west, north)])
+
+
+
+def citation():
+    """
+    Print the OSMnx package's citation information.
+
+    Boeing, G. 2017. OSMnx: New Methods for Acquiring, Constructing, Analyzing,
+    and Visualizing Complex Street Networks. Computers, Environment and Urban
+    Systems, 65(126-139). doi:10.1016/j.compenvurbsys.2017.05.004
+    """
+
+    cite = ("To cite OSMnx, use:\n\n"
+            "Boeing, G. 2017. OSMnx: New Methods for Acquiring, Constructing, Analyzing, "
+            "and Visualizing Complex Street Networks. Computers, Environment and Urban "
+            "Systems, 65(126-139). doi:10.1016/j.compenvurbsys.2017.05.004"
+            "\n\n"
+            "BibTeX entry for LaTeX users:\n\n"
+
+            "@article{boeing_osmnx_2017,\n"
+            "    title = {{OSMnx}: {New} {Methods} for {Acquiring}, {Constructing}, {Analyzing}, and {Visualizing} {Complex} {Street} {Networks}},\n"
+            "    volume = {65},\n"
+            "    doi = {10.1016/j.compenvurbsys.2017.05.004},\n"
+            "    number = {126-139},\n"
+            "    journal = {Computers, Environment and Urban Systems},\n"
+            "    author = {Boeing, G.},\n"
+            "    year = {2017}\n"
+            "}")
+
+    print(cite)
+
+from .save_load import graph_to_gdfs
